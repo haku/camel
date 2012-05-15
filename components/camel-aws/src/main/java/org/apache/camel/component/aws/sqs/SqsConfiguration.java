@@ -119,11 +119,11 @@ public class SqsConfiguration {
         this.defaultVisibilityTimeout = defaultVisibilityTimeout;
     }
 
-    public Integer getDelaySeconds() {
-        return delaySeconds;
+    public Integer getDelaySeconds () {
+        return this.delaySeconds;
     }
 
-    public void setDelaySeconds(Integer delaySeconds) {
+    public void setDelaySeconds (Integer delaySeconds) {
         this.delaySeconds = delaySeconds;
     }
 
