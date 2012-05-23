@@ -63,11 +63,11 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
     private volatile ShutdownRunningTask shutdownRunningTask;
     private volatile int pendingExchanges;
 
-    private final ScheduledExecutorService scheduledEecutor;
+    private final ScheduledExecutorService scheduledExecutor;
 
     public SqsConsumer(SqsEndpoint endpoint, Processor processor) throws NoFactoryAvailableException {
         super(endpoint, processor);
-        this.scheduledEecutor = useTimeoutExtender() ? Executors.newScheduledThreadPool(1) : null;
+        this.scheduledExecutor = getConfiguration().isExtendMessageVisibility() ? Executors.newScheduledThreadPool(1) : null;
     }
 
     @Override
@@ -136,10 +136,11 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
             LOG.trace("Processing exchange [{}]...", exchange);
 
             AtomicBoolean complete = new AtomicBoolean(false);
-            if (useTimeoutExtender()) {
-            	this.scheduledEecutor.schedule(
-                        new TimeoutExtender(exchange, complete, getConfiguration().getVisibilityTimeout()),
-                        getConfiguration().getVisibilityTimeout().intValue() / 2, TimeUnit.SECONDS);
+            Integer visibilityTimeout = getConfiguration().getVisibilityTimeout();
+            if (this.scheduledExecutor != null && visibilityTimeout != null && (visibilityTimeout.intValue() / 2) > 0) {
+                this.scheduledExecutor.schedule(
+                        new TimeoutExtender(exchange, complete, visibilityTimeout),
+                        visibilityTimeout.intValue() / 2, TimeUnit.SECONDS);
             }
 
             try {
@@ -268,11 +269,6 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
         return "SqsConsumer[" + URISupport.sanitizeUri(getEndpoint().getEndpointUri()) + "]";
     }
 
-    private boolean useTimeoutExtender () {
-    	Integer visibilityTimeout = getConfiguration().getVisibilityTimeout();
-    	return visibilityTimeout != null && visibilityTimeout.intValue() > 1;
-    }
-
     private class TimeoutExtender implements Runnable {
 
         private final Exchange exchange;
@@ -299,7 +295,7 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
                 getEndpoint().getClient().changeMessageVisibility(request);
                 LOG.debug("Visibility window extended by {} seconds for exchange {}", this.repeatSeconds, this.exchange);
                 int delay = this.repeatSeconds - (int) Math.floor((System.currentTimeMillis() - startTime) / 1000d);
-                scheduledEecutor.schedule(this, delay, TimeUnit.SECONDS);
+                scheduledExecutor.schedule(this, delay, TimeUnit.SECONDS);
             }
             catch (ReceiptHandleIsInvalidException e) {
                 // Ignore.
