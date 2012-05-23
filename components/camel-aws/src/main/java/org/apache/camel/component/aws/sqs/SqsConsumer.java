@@ -234,7 +234,9 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
     }
 
     public void prepareShutdown() {
-     // noop
+        if (this.scheduledExecutor != null) {
+            this.scheduledExecutor.shutdown();
+        }
     }
     
     protected SqsConfiguration getConfiguration() {
