@@ -19,11 +19,20 @@ package org.apache.camel.component.aws.sqs;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.sqs.AmazonSQSClient;
+import com.amazonaws.services.sqs.model.ChangeMessageVisibilityRequest;
 import com.amazonaws.services.sqs.model.DeleteMessageRequest;
 import com.amazonaws.services.sqs.model.Message;
+import com.amazonaws.services.sqs.model.MessageNotInflightException;
+import com.amazonaws.services.sqs.model.ReceiptHandleIsInvalidException;
 import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
 import com.amazonaws.services.sqs.model.ReceiveMessageResult;
 
@@ -54,8 +63,11 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
     private volatile ShutdownRunningTask shutdownRunningTask;
     private volatile int pendingExchanges;
 
+    private final ScheduledExecutorService scheduledEecutor;
+
     public SqsConsumer(SqsEndpoint endpoint, Processor processor) throws NoFactoryAvailableException {
         super(endpoint, processor);
+        this.scheduledEecutor = useTimeoutExtender() ? Executors.newScheduledThreadPool(1) : null;
     }
 
     @Override
@@ -123,7 +135,19 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
 
             LOG.trace("Processing exchange [{}]...", exchange);
 
-            getProcessor().process(exchange);
+            AtomicBoolean complete = new AtomicBoolean(false);
+            if (useTimeoutExtender()) {
+            	this.scheduledEecutor.schedule(
+                        new TimeoutExtender(exchange, complete, getConfiguration().getVisibilityTimeout()),
+                        getConfiguration().getVisibilityTimeout().intValue() / 2, TimeUnit.SECONDS);
+            }
+
+            try {
+                getProcessor().process(exchange); // This blocks while message is consumed.
+            }
+            finally {
+                complete.set(true);
+            }
         }
 
         return total;
@@ -243,4 +267,51 @@ public class SqsConsumer extends ScheduledPollConsumer implements BatchConsumer,
     public String toString() {
         return "SqsConsumer[" + URISupport.sanitizeUri(getEndpoint().getEndpointUri()) + "]";
     }
+
+    private boolean useTimeoutExtender () {
+    	Integer visibilityTimeout = getConfiguration().getVisibilityTimeout();
+    	return visibilityTimeout != null && visibilityTimeout.intValue() > 1;
+    }
+
+    private class TimeoutExtender implements Runnable {
+
+        private final Exchange exchange;
+        private final AtomicBoolean complete;
+        private final int repeatSeconds;
+
+        public TimeoutExtender (Exchange exchange, AtomicBoolean complete, int repeatSeconds) {
+            this.exchange = exchange;
+            this.complete = complete;
+            this.repeatSeconds = repeatSeconds;
+        }
+
+        @Override
+        public void run () {
+            if (this.complete.get()) return;
+
+            ChangeMessageVisibilityRequest request = new ChangeMessageVisibilityRequest(
+                    getQueueUrl(),
+                    this.exchange.getIn().getHeader(SqsConstants.RECEIPT_HANDLE, String.class),
+                    this.repeatSeconds);
+
+            try {
+                long startTime = System.currentTimeMillis();
+                getEndpoint().getClient().changeMessageVisibility(request);
+                LOG.debug("Visibility window extended by {} seconds for exchange {}", this.repeatSeconds, this.exchange);
+                int delay = this.repeatSeconds - (int) Math.floor((System.currentTimeMillis() - startTime) / 1000d);
+                scheduledEecutor.schedule(this, delay, TimeUnit.SECONDS);
+            }
+            catch (ReceiptHandleIsInvalidException e) {
+                // Ignore.
+            }
+            catch (MessageNotInflightException e) {
+                // Ignore.
+            }
+            catch (Exception e) {
+                LOG.warn("Extending message visibility failed.  Will not attempt to extend visibility further.", e);
+            }
+        }
+
+    }
+
 }
