@@ -33,6 +33,7 @@ import com.amazonaws.services.sqs.model.ReceiptHandleIsInvalidException;
 import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
 import com.amazonaws.services.sqs.model.ReceiveMessageResult;
 
+import org.apache.camel.AsyncCallback;
 import org.apache.camel.Exchange;
 import org.apache.camel.NoFactoryAvailableException;
 import org.apache.camel.Processor;
@@ -73,15 +74,19 @@ public class SqsConsumer extends ScheduledBatchPollingConsumer {
         LOG.trace("Receiving messages with request [{}]...", request);
         
         ReceiveMessageResult messageResult = getClient().receiveMessage(request);
-        
-        LOG.trace("Received {} messages", messageResult.getMessages().size());
+
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("Received {} messages", messageResult.getMessages().size());
+        }
         
         Queue<Exchange> exchanges = createExchanges(messageResult.getMessages());
         return processBatch(CastUtils.cast(exchanges));
     }
     
     protected Queue<Exchange> createExchanges(List<Message> messages) {
-        LOG.trace("Received {} messages in this poll", messages.size());
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("Received {} messages in this poll", messages.size());
+        }
         
         Queue<Exchange> answer = new LinkedList<Exchange>();
         for (Message message : messages) {
@@ -97,7 +102,7 @@ public class SqsConsumer extends ScheduledBatchPollingConsumer {
 
         for (int index = 0; index < total && isBatchAllowed(); index++) {
             // only loop if we are started (allowed to run)
-            Exchange exchange = ObjectHelper.cast(Exchange.class, exchanges.poll());
+            final Exchange exchange = ObjectHelper.cast(Exchange.class, exchanges.poll());
             // add current index and total as properties
             exchange.setProperty(Exchange.BATCH_INDEX, index);
             exchange.setProperty(Exchange.BATCH_SIZE, total);
@@ -111,11 +116,11 @@ public class SqsConsumer extends ScheduledBatchPollingConsumer {
             if (this.scheduledExecutor != null && visibilityTimeout != null && (visibilityTimeout.intValue() / 2) > 0) {
                 int delay = visibilityTimeout.intValue() / 2;
                 int period = visibilityTimeout.intValue();
-                LOG.debug("Scheduled TimeoutExtender task to start after {} delay, and run with {} period (seconds) to extend exchangeId: {}",
-                        new Object[]{delay, period, exchange.getExchangeId()});
-                int repeatSeconds = new Double(visibilityTimeout.doubleValue() * 1.5).intValue();   //
-                LOG.debug("period :" + period);
-                LOG.debug("repeatSeconds :" + repeatSeconds);
+                int repeatSeconds = new Double(visibilityTimeout.doubleValue() * 1.5).intValue();
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Scheduled TimeoutExtender task to start after {} delay, and run with {}/{} period/repeat (seconds), to extend exchangeId: {}",
+                            new Object[]{delay, period, repeatSeconds, exchange.getExchangeId()});
+                }
                 final ScheduledFuture<?> scheduledFuture = this.scheduledExecutor.scheduleAtFixedRate(
                         new TimeoutExtender(exchange, repeatSeconds), delay, period, TimeUnit.SECONDS);
                 exchange.addOnCompletion(new Synchronization() {
@@ -156,12 +161,12 @@ public class SqsConsumer extends ScheduledBatchPollingConsumer {
 
 
             LOG.trace("Processing exchange [{}]...", exchange);
-            try {
-                // This blocks while message is consumed.
-                getProcessor().process(exchange);
-            } finally {
-                LOG.trace("Processing exchange [{}] done.", exchange);
-            }
+            getAsyncProcessor().process(exchange, new AsyncCallback() {
+                @Override
+                public void done(boolean doneSync) {
+                    LOG.trace("Processing exchange [{}] done.", exchange);
+                }
+            });
         }
 
         return total;
@@ -182,10 +187,10 @@ public class SqsConsumer extends ScheduledBatchPollingConsumer {
                 
                 getClient().deleteMessage(deleteRequest);
 
-                LOG.trace("Message deleted");
+                LOG.trace("Deleted message with receipt handle {}...", receiptHandle);
             }
         } catch (AmazonClientException e) {
-            getExceptionHandler().handleException("Error occurred during deleting message.", e);
+            getExceptionHandler().handleException("Error occurred during deleting message. This exception is ignored.", exchange, e);
         }
     }
 
